@@ -43,6 +43,36 @@
   </div>
 </div>
 
+{% if migration_notice %}
+<div class="alert {% if migration_failed %}alert-error{% else %}alert-info{% endif %}">{{ migration_notice }}</div>
+{% endif %}
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>契约迁移（金额：元 → 分）</h2>
+    <div class="panel-actions">
+      {% if migration_status.applied %}<span class="tag ok">已应用</span>{% else %}<span class="tag warn">待迁移</span>{% endif %}
+    </div>
+  </div>
+  <div class="panel-body tight">
+    <p class="small" style="margin:0 0 6px">
+      迁移 <code>{{ migration_status.migration_id }}</code>：给历史批次盖章契约版本、回填明细原值、
+      以明细为准重算站点汇总与批次总额，单事务一次性切换；失败整体回滚保留旧结果，重跑不新增批次。
+    </p>
+    <p class="small muted" style="margin:0">
+      批次共 {{ migration_status.batches }} 个（{% for v, n in migration_status.batches_by_version.items() %}{{ v }} × {{ n }}{% if not loop.last %} · {% endif %}{% else %}无{% endfor %}）；
+      待盖章 {{ migration_status.unstamped_batches }} 个 · 待回填原值 {{ migration_status.details_missing_amount_raw }} 行。
+      旧版本批次结果始终可查。
+    </p>
+  </div>
+  <div class="panel-actions">
+    <form method="post" action="/migration/run" style="display:inline">
+      <button type="submit" class="secondary small">{% if migration_status.applied %}重跑迁移（幂等）{% else %}运行迁移{% endif %}</button>
+    </form>
+    <a class="btn secondary small" href="/api/migration">查看迁移状态 JSON</a>
+  </div>
+</section>
+
 <div class="split result">
   <div>
     <section class="panel">
@@ -66,7 +96,7 @@
       <div class="table-wrap roomy">
         <table class="dense" id="batches-table">
           <thead>
-            <tr><th>批号</th><th>文件</th><th>编码</th><th class="num">行数</th><th class="num">金额合计</th><th>时间</th><th>重复导入验证</th></tr>
+            <tr><th>批号</th><th>文件</th><th>契约版本</th><th>编码</th><th class="num">行数</th><th class="num">金额合计</th><th>时间</th><th>重复导入验证</th></tr>
           </thead>
           <tbody>
           {% for b in batches %}
@@ -77,11 +107,12 @@
                 data-sha="{{ b.sha256[:16] }}…"
                 data-forced="{{ '1' if b.forced else '0' }}"
                 data-superseded="{{ '1' if b.superseded_by else '0' }}"
-                data-search="{{ b.batch_id }} {{ b.filename }} {{ b.sha256 }} {{ b.encoding }}">
+                data-search="{{ b.batch_id }} {{ b.filename }} {{ b.sha256 }} {{ b.encoding }} {{ b.contract_version or 'legacy' }}">
               <td class="nowrap"><a href="/result/{{ b.batch_id }}">{{ b.batch_id }}</a>
                 {% if b.forced %}<span class="tag warn">forced</span>{% endif %}
                 {% if b.superseded_by %}<span class="tag">已替代</span>{% endif %}</td>
               <td class="cell-ellipsis">{{ b.filename }}</td>
+              <td><span class="tag">{{ b.contract_version or 'legacy' }}</span></td>
               <td><span class="tag">{{ b.encoding }}</span>{% if b.bom %} BOM{% endif %}</td>
               <td class="num">{{ b.row_count }}</td>
               <td class="num">¥{{ b.total_amount }}</td>
@@ -92,7 +123,7 @@
               </td>
             </tr>
           {% else %}
-            <tr><td colspan="7" class="muted">还没有入库批次。</td></tr>
+            <tr><td colspan="8" class="muted">还没有入库批次。</td></tr>
           {% endfor %}
           </tbody>
         </table>
@@ -109,7 +140,7 @@
       </div>
       <div class="table-wrap roomy">
         <table class="dense" id="attempts-table">
-          <thead><tr><th>#</th><th>文件</th><th>结论</th><th>编码</th><th class="num">行数</th><th class="num">错误数</th><th>时间</th><th></th></tr></thead>
+          <thead><tr><th>#</th><th>文件</th><th>结论</th><th>契约版本</th><th>编码</th><th class="num">行数</th><th class="num">错误数</th><th>时间</th><th></th></tr></thead>
           <tbody>
           {% for a in attempts %}
             <tr data-search="{{ a.attempt_id }} {{ a.filename }} {{ a.status }} {{ a.batch_id or '' }}">
@@ -123,6 +154,7 @@
                 {% elif a.status == 'encoding_failed' %}<span class="tag err">编码失败</span>
                 {% else %}<span class="tag">{{ a.status }}</span>{% endif %}
               </td>
+              <td class="small">{{ a.contract_version or 'legacy' }}</td>
               <td class="small">{{ a.encoding or '-' }}</td>
               <td class="num">{{ a.row_count }}</td>
               <td class="num">{{ a.error_count }}</td>
@@ -136,7 +168,7 @@
               </td>
             </tr>
           {% else %}
-            <tr><td colspan="8" class="muted">还没有上传记录。</td></tr>
+            <tr><td colspan="9" class="muted">还没有上传记录。</td></tr>
           {% endfor %}
           </tbody>
         </table>
@@ -155,6 +187,7 @@
           <tbody>
             <tr><th style="width:96px">批号</th><td><code id="detail-batch">{{ latest.batch_id if latest else '—' }}</code></td></tr>
             <tr><th>文件</th><td id="detail-filename" class="cell-ellipsis">{{ latest.filename if latest else '—' }}</td></tr>
+            <tr><th>契约版本</th><td id="detail-version">{{ (latest.contract_version or 'legacy') if latest else '—' }}</td></tr>
             <tr><th>编码</th><td id="detail-encoding">{{ (latest.encoding ~ (' BOM' if latest.bom else '')) if latest else '—' }}</td></tr>
             <tr><th>行数</th><td id="detail-rows">{{ latest.row_count if latest else '—' }}</td></tr>
             <tr><th>金额合计</th><td id="detail-amount">¥{{ latest.total_amount if latest else '—' }}</td></tr>
@@ -172,7 +205,8 @@
         <ul class="list small" style="margin:6px 0 0">
           <li><b>全对才入库</b>：表头契约 + 全部行校验通过后，才在一个事务里写批次、明细、聚合。</li>
           <li><b>回滚可见</b>：任一行非法 → KPI「被拒绝/回滚的上传次数」+1，明细行数不变，可点开看逐行错误。</li>
-          <li><b>重复文件</b>：sha256 相同 → duplicate_file，不写库；确需重灌用 force_new_batch，旧批次标 superseded_by。</li>
+          <li><b>重复文件</b>：sha256 + 契约版本都相同 → duplicate_file，不写库；确需重灌用 force_new_batch，旧批次标 superseded_by。</li>
+          <li><b>契约版本</b>：每次导入带明确版本（v1-yuan 按元 / v2-cents 按分），金额统一换算成分入库，跨版本可对账。</li>
           <li><b>聚合自证</b>：结果页聚合用三条独立口径（分组 cents / 明细线性 / Decimal）互相核对。</li>
         </ul>
       </details>

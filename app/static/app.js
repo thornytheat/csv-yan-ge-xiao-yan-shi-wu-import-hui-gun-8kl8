@@ -41,13 +41,16 @@
     if (contractErr) contractErr.hidden = true;
     contractOut.innerHTML = '<span class="muted">检查中…</span>';
     var policy = qs('#extra_policy') ? qs('#extra_policy').value : 'reject';
+    var version = qs('#contract_version') ? qs('#contract_version').value : '';
     try {
       var data = await window.postJSON('/api/contract-check', {
         header: headerText,
-        extra_policy: policy
+        extra_policy: policy,
+        contract_version: version
       });
       var rows = ['<p><b>' + (data.ok ? '契约通过' : '契约未通过') + '</b>'
-        + '<span class="muted">（策略：' + esc(data.extra_policy) + '，列顺序无关）</span></p>'];
+        + '<span class="muted">（版本：' + esc(data.contract_version || '默认')
+        + '，策略：' + esc(data.extra_policy) + '，列顺序无关）</span></p>'];
 
       if (!data.ok) {
         rows.push('<table><thead><tr><th>错误</th><th>说明</th></tr></thead><tbody>');

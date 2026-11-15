@@ -15,6 +15,7 @@
     <p class="page-sub">
       文件 <b>{{ batch.filename }}</b> · 编码 <span class="tag ok">{{ batch.encoding }}</span>
       {% if batch.bom %}含 UTF-8 BOM（已剥离）{% else %}无 BOM{% endif %} ·
+      契约版本 <span class="tag">{{ batch.contract_version or 'legacy' }}</span> ·
       入库时间 {{ batch.created_at }} ·
       <span class="tag ok">已入库</span> 单事务提交，无回滚
       {% if batch.superseded_by %} · <span class="tag warn">已被 {{ batch.superseded_by }} 替代</span>{% endif %}
@@ -110,6 +111,8 @@
           <tr><th style="width:180px">批号</th><td><code>{{ batch.batch_id }}</code>
             {% if batch.forced %}<span class="tag warn">force_new_batch</span>{% endif %}</td></tr>
           <tr><th>文件名</th><td>{{ batch.filename }}</td></tr>
+          <tr><th>契约版本</th><td><span class="tag">{{ batch.contract_version or 'legacy' }}</span>
+            <span class="muted small">金额按该版本口径校验，入库统一换算成分（amount_cents）</span></td></tr>
           <tr><th>文件 sha256</th><td><code class="mono">{{ batch.sha256 }}</code></td></tr>
           <tr><th>编码探测</th><td><span class="tag ok">{{ batch.encoding }}</span>
             {% if batch.bom %}含 UTF-8 BOM（已剥离）{% else %}无 BOM{% endif %}</td></tr>
@@ -154,7 +157,7 @@
   <div id="tab-detail" class="tab-panel" hidden>
     <div class="table-wrap roomy">
       <table class="dense">
-        <thead><tr><th class="num">行号</th><th>order_id</th><th>site</th><th>category</th><th>order_date</th><th class="num">amount</th><th class="num">qty</th></tr></thead>
+        <thead><tr><th class="num">行号</th><th>order_id</th><th>site</th><th>category</th><th>order_date</th><th class="num">amount</th><th class="num">原值（{{ batch.contract_version or 'legacy' }} 口径）</th><th class="num">qty</th></tr></thead>
         <tbody>
           {% for r in batch.sample_rows %}
           <tr>
@@ -164,6 +167,7 @@
             <td>{{ r.category }}</td>
             <td>{{ r.order_date }}</td>
             <td class="num">{{ r.amount }}</td>
+            <td class="num">{{ r.amount_raw if r.amount_raw is not none else '—' }}</td>
             <td class="num">{{ r.qty }}</td>
           </tr>
           {% endfor %}
@@ -171,7 +175,7 @@
       </table>
     </div>
     <div class="panel-body tight">
-      <p class="small muted" style="margin:0"><b>明细前 20 行（用于抽验）</b> · 完整明细在 fact_orders 表（volume csvgate-data），只展示前 20 行。</p>
+      <p class="small muted" style="margin:0"><b>明细前 20 行（用于抽验）</b> · amount 列为统一换算后的元；原值列是该批次契约版本口径下的原始字符串（fact_orders.amount_raw）。完整明细在 fact_orders 表（volume csvgate-data），只展示前 20 行。</p>
     </div>
   </div>
 </div>

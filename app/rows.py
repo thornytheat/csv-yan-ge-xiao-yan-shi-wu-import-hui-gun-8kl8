@@ -3,6 +3,11 @@
 每行按「必填 → 长度 → 类型/枚举 → 业务规则」顺序校验，同一单元格只报第一个错，
 保证 broken.csv 的 5 类错误各报 1 条、不会被重复计数。
 
+金额按契约版本分口径：
+- v1-yuan ：decimal 元，最多 2 位小数，0.01 ~ 99999999.99；
+- v2-cents：整数分，1 ~ 9999999999。
+两版最终都换算成 amount_cents（分）入库，跨版本可对账。
+
 主键规则：strictly_increasing，逐行与「上一条主键可解析的行」比较：
 - 相等 → duplicate
 - 更小 → out_of_order
@@ -32,6 +37,8 @@ CODE_LABELS = {
     "decimal_type": "金额格式错误",
     "decimal_scale": "金额小数位超限",
     "decimal_range": "金额超出允许范围",
+    "cents_type": "金额（分）格式错误",
+    "cents_range": "金额（分）超出允许范围",
     "enum": "枚举值越界",
     "duplicate": "主键重复",
     "out_of_order": "主键倒序",
@@ -89,8 +96,16 @@ def _cell(record: list[str], idx: int) -> str:
     return ""
 
 
-def validate(records: list[list[str]], header: list[str], columns_used: list[str]) -> RowValidation:
-    """records = csv.reader 的数据行（不含表头）；header 为已归一化的表头。"""
+def validate(records: list[list[str]], header: list[str], columns_used: list[str],
+             version: str | None = None) -> RowValidation:
+    """records = csv.reader 的数据行（不含表头）；header 为已归一化的表头。
+
+    version 为契约版本（缺省 = 默认版 v1-yuan），决定 amount 列的口径与校验规则。
+    """
+    resolved = contract.resolve_version(version)
+    specs = contract.specs_for(resolved)
+    unit = contract.amount_unit(resolved)
+
     header_len = len(header)
     index = contract.index_of(header, columns_used)
     result = RowValidation(row_count=len(records))
@@ -123,13 +138,13 @@ def validate(records: list[list[str]], header: list[str], columns_used: list[str
             if name not in values:
                 continue
             if not values[name]:
-                add(name, "required", "", f"{contract.COLUMN_SPECS[name]['label']}为空，契约要求必填。")
+                add(name, "required", "", f"{specs[name]['label']}为空，契约要求必填。")
 
         # 2) 长度（先于类型，避免超长值又被报成类型错）
         for name, raw in values.items():
             if name in per_cell or not raw:
                 continue
-            limit = contract.COLUMN_SPECS[name].get("max_length")
+            limit = specs[name].get("max_length")
             if limit and len(raw) > limit:
                 add(name, "length", raw,
                     f"长度 {len(raw)} 超过上限 {limit}（按字符计，含空格已去首尾）。")
@@ -164,31 +179,46 @@ def validate(records: list[list[str]], header: list[str], columns_used: list[str
 
         if "amount" in values and "amount" not in per_cell and values["amount"]:
             raw = values["amount"]
-            if not DEC_RE.match(raw):
-                add("amount", "decimal_type", raw,
-                    "金额需为纯数字（如 128.50），不允许千分位、货币符号、空格。")
-            else:
-                try:
-                    amount = Decimal(raw)
-                except InvalidOperation:
-                    add("amount", "decimal_type", raw, f"「{raw}」无法解析为金额。")
+            if unit == "cent":
+                # v2-cents：金额按分，必须是正整数，不允许小数点/货币符号
+                if not INT_RE.match(raw):
+                    add("amount", "cents_type", raw,
+                        f"契约 {resolved} 要求金额按分填写整数（如 12850 表示 128.50 元），"
+                        f"「{raw}」不是整数；若文件仍是元口径，请改用 v1-yuan 版本导入。")
                 else:
-                    exponent = -amount.as_tuple().exponent  # type: ignore[arg-type]
-                    if exponent > 2:
-                        add("amount", "decimal_scale", raw,
-                            f"小数位 {exponent} 位，超过 2 位；请先在上游四舍五入到分。")
-                    elif amount <= 0:
-                        add("amount", "decimal_range", raw, f"金额需大于 0，当前 {raw}。")
-                    elif amount > Decimal("99999999.99"):
-                        add("amount", "decimal_range", raw,
-                            f"金额 {raw} 超过上限 99999999.99，疑似单位错误。")
+                    cents = int(raw)
+                    if cents < 1 or cents > contract.MAX_AMOUNT_CENTS:
+                        add("amount", "cents_range", raw,
+                            f"金额（分）需在 1~{contract.MAX_AMOUNT_CENTS}，当前 {raw}。")
                     else:
-                        parsed["amount_cents"] = int(amount * 100)
+                        parsed["amount_cents"] = cents
+            else:
+                # v1-yuan：金额按元，decimal、最多 2 位小数
+                if not DEC_RE.match(raw):
+                    add("amount", "decimal_type", raw,
+                        "金额需为纯数字（如 128.50），不允许千分位、货币符号、空格。")
+                else:
+                    try:
+                        amount = Decimal(raw)
+                    except InvalidOperation:
+                        add("amount", "decimal_type", raw, f"「{raw}」无法解析为金额。")
+                    else:
+                        exponent = -amount.as_tuple().exponent  # type: ignore[arg-type]
+                        if exponent > 2:
+                            add("amount", "decimal_scale", raw,
+                                f"小数位 {exponent} 位，超过 2 位；请先在上游四舍五入到分。")
+                        elif amount <= 0:
+                            add("amount", "decimal_range", raw, f"金额需大于 0，当前 {raw}。")
+                        elif amount > Decimal("99999999.99"):
+                            add("amount", "decimal_range", raw,
+                                f"金额 {raw} 超过上限 99999999.99，疑似单位错误。")
+                        else:
+                            parsed["amount_cents"] = int(amount * 100)
 
         for name in ("site", "category"):
             if name not in values or name in per_cell or not values[name]:
                 continue
-            allowed = contract.COLUMN_SPECS[name]["enum"]
+            allowed = specs[name]["enum"]
             if values[name] not in allowed:
                 add(name, "enum", values[name],
                     f"「{values[name]}」不在允许值内：{', '.join(allowed)}。")

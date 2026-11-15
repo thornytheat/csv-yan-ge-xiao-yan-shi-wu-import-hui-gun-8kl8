@@ -38,6 +38,7 @@ def run(
     conn: sqlite3.Connection | None = None,
     fail_after: int | None = None,
     batch_id: str | None = None,
+    contract_version: str | None = None,
 ) -> dict:
     own_conn = conn is None
     conn = conn or store.connect()
@@ -52,13 +53,28 @@ def run(
             "sample_hex": encoding.sample_hex(raw),
         }
 
+        # 0) 契约版本：每次导入都必须解析出明确版本（缺省 = 默认版，兼容旧文件）
+        try:
+            version = contract.resolve_version(contract_version)
+        except contract.UnknownContractVersion as exc:
+            result.update({
+                "status": "unknown_contract_version",
+                "detail": str(exc),
+                "available_versions": contract.versions_info(),
+                "rows_before": store.count_rows(conn),
+                "rows_after": store.count_rows(conn),
+            })
+            return result
+        result["contract_version"] = version
+        result["amount_unit"] = contract.amount_unit(version)
+
         # 1) 编码探测
         try:
             probe = encoding.probe(raw)
         except encoding.EncodingError as exc:
             attempt_id = store.record_attempt(
                 conn, filename=filename, sha256=sha, status="encoding_failed",
-                detail=exc.message,
+                detail=exc.message, contract_version=version,
             )
             result.update({
                 "status": "encoding_failed",
@@ -76,9 +92,9 @@ def run(
 
         result["encoding"] = probe.evidence()
 
-        # 2) 表头契约
+        # 2) 表头契约（按解析出的版本校验）
         header, data, blank_lines = parse_csv(probe.text)
-        contract_result = contract.check(header, extra_policy)
+        contract_result = contract.check(header, extra_policy, version=version)
         result["contract"] = contract_result
         result["data_row_count"] = len(data)
         result["skipped_blank_lines"] = blank_lines
@@ -94,7 +110,7 @@ def run(
                 conn, filename=filename, sha256=sha, status="rejected",
                 encoding=probe.encoding, error_count=len(contract_result["errors"]),
                 row_count=len(data), detail=f"表头契约未通过：{detail}",
-                errors=header_errors,
+                errors=header_errors, contract_version=version,
             )
             result.update({
                 "status": "rejected",
@@ -107,8 +123,9 @@ def run(
             })
             return result
 
-        # 3) 行级校验
-        validation = rows_mod.validate(data, contract_result["header"], contract_result["columns_used"])
+        # 3) 行级校验（金额按版本口径：v1 元 / v2 分）
+        validation = rows_mod.validate(data, contract_result["header"],
+                                       contract_result["columns_used"], version=version)
         result["row_validation"] = {
             "ok": validation.ok,
             "row_count": validation.row_count,
@@ -124,7 +141,7 @@ def run(
                 conn, filename=filename, sha256=sha, status="rejected",
                 encoding=probe.encoding, error_count=validation.error_count,
                 row_count=len(data), detail=detail,
-                errors=validation.error_dicts(),
+                errors=validation.error_dicts(), contract_version=version,
             )
             result.update({
                 "status": "rejected",
@@ -136,15 +153,16 @@ def run(
             })
             return result
 
-        # 4) 聚合 + 一致性自证
-        summary = aggregate.summarize(validation.rows)
+        # 4) 聚合 + 一致性自证（Decimal 复核按版本口径换算）
+        summary = aggregate.summarize(validation.rows, amount_unit=result["amount_unit"])
         result["aggregate"] = summary
 
-        # 5) 事务导入（含重复文件判定）
+        # 5) 事务导入（含重复文件判定：同 sha256 + 同契约版本才算重复）
         outcome = importer.import_batch(
             conn, filename=filename, sha256=sha, rows=validation.rows,
             aggregates=summary, encoding=probe.encoding, bom=probe.bom,
             force_new_batch=force_new_batch, fail_after=fail_after, batch_id=batch_id,
+            contract_version=version,
         )
         result["import"] = outcome
         result["status"] = outcome["status"]

@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import contract, pipeline, report, seed, settings, store
+from . import contract, migrate, pipeline, report, seed, settings, store
 
 MAX_BYTES = 8 * 1024 * 1024
 
@@ -20,6 +20,7 @@ STATUS_HTTP = {
     "duplicate_file": 200,
     "rejected": 422,
     "encoding_failed": 400,
+    "unknown_contract_version": 400,
     "rolled_back": 500,
 }
 
@@ -35,6 +36,8 @@ async def lifespan(app: FastAPI):
         store.init_schema(conn)
         info = seed.ensure_seed(conn)
         app.state.seed_info = info
+        # 契约迁移：升级后重算明细与站点汇总并一次性切换；幂等，失败保留旧结果
+        app.state.migration_info = migrate.run(conn)
     finally:
         conn.close()
     yield
@@ -81,6 +84,8 @@ def health():
             "db": str(settings.DB_PATH),
             "fact_rows": store.count_rows(conn),
             "seed_version": store.get_meta(conn, "seed_version"),
+            "default_contract_version": contract.DEFAULT_VERSION,
+            "contract_migration": migrate.status(conn),
         }
     finally:
         conn.close()
@@ -110,12 +115,9 @@ def workbench(request: Request):
         "active": "workbench",
         "page": "workbench",
         "policies": settings.EXTRA_POLICIES,
-        "column_contract": [
-            {"name": n, "required": s["required"], "type": s["type"],
-             "label": s["label"], "max_length": s.get("max_length"),
-             "enum": s.get("enum")}
-            for n, s in contract.COLUMN_SPECS.items()
-        ],
+        "contract_versions": contract.versions_info(),
+        "default_contract_version": contract.DEFAULT_VERSION,
+        "column_contract": _column_contract(),
         "sites": contract.SITES,
         "categories": contract.CATEGORIES,
     })
@@ -157,13 +159,15 @@ async def workbench_submit(
     file: UploadFile = File(...),
     extra_policy: str = Form("reject"),
     force_new_batch: str = Form(""),
+    contract_version: str = Form(""),
 ):
     raw = await _read_upload(file)
     forced = force_new_batch.lower() in ("1", "true", "on", "yes")
     conn = get_conn()
     try:
         result = pipeline.run(raw, file.filename or "upload.csv",
-                              extra_policy=extra_policy, force_new_batch=forced, conn=conn)
+                              extra_policy=extra_policy, force_new_batch=forced, conn=conn,
+                              contract_version=contract_version)
     finally:
         conn.close()
 
@@ -173,28 +177,24 @@ async def workbench_submit(
         if status == "duplicate_file":
             flag = "duplicate_file=1"
         return RedirectResponse(url=f"/result/{result['batch_id']}?{flag}", status_code=303)
-    if status == "rejected":
-        return _render(request, "workbench.html", {
-            "active": "workbench",
-            "page": "workbench",
-            "policies": settings.EXTRA_POLICIES,
-            "column_contract": _column_contract(),
-            "sites": contract.SITES,
-            "categories": contract.CATEGORIES,
-            "result": result,
-            "error": result.get("detail", "校验未通过"),
-            "filename": result.get("filename"),
-        }, status_code=422)
-    return _render(request, "workbench.html", {
+    render_ctx = {
         "active": "workbench",
         "page": "workbench",
         "policies": settings.EXTRA_POLICIES,
+        "contract_versions": contract.versions_info(),
+        "default_contract_version": contract.DEFAULT_VERSION,
         "column_contract": _column_contract(),
         "sites": contract.SITES,
         "categories": contract.CATEGORIES,
         "result": result,
-        "error": result.get("detail", "未能入库"),
         "filename": result.get("filename"),
+    }
+    if status == "rejected":
+        return _render(request, "workbench.html", {
+            **render_ctx, "error": result.get("detail", "校验未通过"),
+        }, status_code=422)
+    return _render(request, "workbench.html", {
+        **render_ctx, "error": result.get("detail", "未能入库"),
     }, status_code=STATUS_HTTP.get(status, 400))
 
 
@@ -275,22 +275,31 @@ def attempt_page(request: Request, attempt_id: int):
 
 
 @app.get("/review", response_class=HTMLResponse)
-def review(request: Request):
+def review(request: Request, migration: str = ""):
     conn = get_conn()
     try:
         batches = store.list_batches(conn, limit=30)
         attempts = store.list_attempts(conn, limit=30)
         stats = store.stats(conn)
+        migration_status = migrate.status(conn)
     finally:
         conn.close()
     for attempt in attempts:
         attempt.pop("errors_json", None)
+    notices = {
+        "applied": "契约迁移已完成：明细与站点汇总已重算并一次性切换。",
+        "already_applied": "同一迁移此前已应用，本次未新增批次、未改动任何行。",
+        "failed": "契约迁移失败已整体回滚，库内保留上一份完整结果；可修正后重跑。",
+    }
     return _render(request, "review.html", {
         "active": "review",
         "page": "review",
         "batches": batches,
         "attempts": attempts,
         "stats": stats,
+        "migration_status": migration_status,
+        "migration_notice": notices.get(migration, ""),
+        "migration_failed": migration == "failed",
     })
 
 
@@ -302,13 +311,15 @@ async def api_import(
     file: UploadFile = File(...),
     extra_policy: str = Form("reject"),
     force_new_batch: str = Form(""),
+    contract_version: str = Form(""),
 ):
     raw = await _read_upload(file)
     forced = force_new_batch.lower() in ("1", "true", "on", "yes")
     conn = get_conn()
     try:
         result = pipeline.run(raw, file.filename or "upload.csv",
-                              extra_policy=extra_policy, force_new_batch=forced, conn=conn)
+                              extra_policy=extra_policy, force_new_batch=forced, conn=conn,
+                              contract_version=contract_version)
     finally:
         conn.close()
     payload = _public_result(result)
@@ -326,12 +337,66 @@ async def api_contract_check(request: Request):
     body = await request.json()
     header_line = (body.get("header") or "").strip()
     policy = body.get("extra_policy") or "reject"
+    version = body.get("contract_version") or ""
     if not header_line:
         return JSONResponse({"detail": "请粘贴表头行"}, status_code=400)
+    try:
+        contract.resolve_version(version)
+    except contract.UnknownContractVersion as exc:
+        return JSONResponse({"detail": str(exc),
+                             "available_versions": contract.versions_info()}, status_code=400)
     cells = [c for c in header_line.replace("\t", ",").split(",")]
-    result = contract.check(cells, policy)
+    result = contract.check(cells, policy, version=version)
     result.pop("column_contract", None)
     return result
+
+
+@app.get("/api/contracts")
+def api_contracts():
+    """已注册的契约版本清单 + 当前迁移状态（每次导入该用哪个版本看这里）。"""
+    conn = get_conn()
+    try:
+        migration = migrate.status(conn)
+    finally:
+        conn.close()
+    return {
+        "default_version": contract.DEFAULT_VERSION,
+        "versions": contract.versions_info(),
+        "migration": migration,
+    }
+
+
+@app.get("/api/migration")
+def api_migration_status():
+    """契约迁移状态：是否已应用、各版本批次数、待盖章/待回填行数。"""
+    conn = get_conn()
+    try:
+        return migrate.status(conn)
+    finally:
+        conn.close()
+
+
+@app.post("/api/migration")
+def api_migration_run():
+    """执行契约迁移：重算明细与站点汇总，单事务一次性切换；幂等可重跑。"""
+    conn = get_conn()
+    try:
+        outcome = migrate.run(conn)
+    finally:
+        conn.close()
+    code = 200 if outcome["status"] in ("applied", "already_applied") else 500
+    return JSONResponse(outcome, status_code=code)
+
+
+@app.post("/migration/run")
+def migration_run_form():
+    """复核页「运行迁移」按钮：执行后 303 回复核页看状态。"""
+    conn = get_conn()
+    try:
+        outcome = migrate.run(conn)
+    finally:
+        conn.close()
+    return RedirectResponse(url=f"/review?migration={outcome['status']}", status_code=303)
 
 
 @app.post("/api/replay-check")

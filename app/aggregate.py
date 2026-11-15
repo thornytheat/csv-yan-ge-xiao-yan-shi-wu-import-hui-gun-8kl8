@@ -3,7 +3,7 @@
 一致性自证用三条互不依赖的路径：
 A. 分组累加：每个 site 一组，组内累加 cents
 B. 单趟线性累加：遍历全部明细，不分组，得到一个总额
-C. Decimal 复核：用原始金额字符串做 Decimal 求和，再 ×100 取整
+C. Decimal 复核：用原始金额字符串按契约口径（元 ×100 / 分 ×1）求和取整
 另外核对「组内行数之和 == 明细行数」。任一不符 → consistent=False。
 """
 from __future__ import annotations
@@ -11,7 +11,9 @@ from __future__ import annotations
 from decimal import Decimal
 
 
-def summarize(rows: list[dict]) -> dict:
+def summarize(rows: list[dict], amount_unit: str = "yuan") -> dict:
+    """amount_unit：yuan（原始字符串是元，复核 ×100）| cent（原始字符串是分，复核 ×1）。"""
+    factor = 1 if amount_unit == "cent" else 100
     groups: dict[str, dict] = {}
     linear_cents = 0
     linear_qty = 0
@@ -36,7 +38,7 @@ def summarize(rows: list[dict]) -> dict:
     decimal_error = ""
     try:
         total = sum((Decimal(row["amount_raw"]) for row in rows), Decimal("0"))
-        decimal_cents = int(total * 100)
+        decimal_cents = int(total * factor)
     except Exception as exc:  # pragma: no cover - 防御性
         decimal_error = str(exc)
 
@@ -59,7 +61,8 @@ def summarize(rows: list[dict]) -> dict:
         {
             "name": "Decimal 原始字符串复核一致",
             "ok": (not decimal_error) and decimal_cents == linear_cents,
-            "detail": (f"Decimal 复核 {decimal_cents} 分 vs 明细 {linear_cents} 分"
+            "detail": (f"Decimal 复核 {decimal_cents} 分（按{amount_unit}口径 ×{factor}）"
+                       f" vs 明细 {linear_cents} 分"
                        if not decimal_error else f"Decimal 复核异常：{decimal_error}"),
         },
     ]

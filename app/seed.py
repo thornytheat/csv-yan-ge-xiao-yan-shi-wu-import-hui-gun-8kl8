@@ -1,12 +1,13 @@
 """启动即用的历史批次 seed（幂等：以 meta.seed_version 为准）。
 
 seed 走与真实上传完全相同的管道，因此样例库里的聚合与明细天然自洽。
+seed 文件是元口径历史数据，显式按 v1-yuan 契约版本导入。
 """
 from __future__ import annotations
 
 import sqlite3
 
-from . import pipeline, settings, store
+from . import contract, pipeline, settings, store
 
 
 def ensure_seed(conn: sqlite3.Connection) -> dict:
@@ -20,7 +21,7 @@ def ensure_seed(conn: sqlite3.Connection) -> dict:
     raw = path.read_bytes()
     result = pipeline.run(
         raw, settings.SEED_FILENAME, extra_policy="reject", conn=conn,
-        batch_id=settings.SEED_BATCH_ID,
+        batch_id=settings.SEED_BATCH_ID, contract_version=contract.DEFAULT_VERSION,
     )
 
     if result.get("status") == "committed":

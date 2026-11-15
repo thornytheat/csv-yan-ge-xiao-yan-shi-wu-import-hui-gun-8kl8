@@ -3,9 +3,12 @@
 语义：
 - 单事务写入：BEGIN IMMEDIATE → 批次 + 明细 + 聚合 → COMMIT；任一语句异常 → ROLLBACK，
   明细行数保持写入前值（test_importer 用 fail_after 注入故障证明）。
-- 重复文件：同 sha256 已入库 → duplicate_file，不写入任何行，返回既有批次号。
+- 重复文件：同 (sha256, 契约版本) 已入库 → duplicate_file，不写入任何行，返回既有批次号。
+  同一份字节按不同契约版本解释是不同的导入，不算重复，各自成批。
 - force_new_batch=true：显式覆盖策略，新建批次号（-F2/-F3…）重新入库；
   旧批次保留并把 superseded_by 指向新批次，便于追溯「同一份文件被重灌了几次」。
+- 每个批次都带明确的契约版本（contract_version），明细行保留 amount_raw 原始字符串，
+  供契约迁移重算复核。
 """
 from __future__ import annotations
 
@@ -13,7 +16,7 @@ import hashlib
 import sqlite3
 from datetime import datetime
 
-from . import store
+from . import contract, store
 
 
 def file_sha256(raw: bytes) -> str:
@@ -53,16 +56,19 @@ def import_batch(
     fail_after: int | None = None,
     note: str = "",
     batch_id: str | None = None,
+    contract_version: str | None = None,
 ) -> dict:
     """返回导入结论；不抛业务异常（故障也以 rolled_back 结果返回，便于页面展示）。"""
-    existing = store.find_batch_by_sha(conn, sha256)
+    version = contract.resolve_version(contract_version)
+    existing = store.find_batch_by_sha(conn, sha256, contract_version=version)
     rows_before = store.count_rows(conn)
 
     if existing and not force_new_batch:
         attempt_id = store.record_attempt(
             conn, filename=filename, sha256=sha256, status="duplicate_file",
             encoding=encoding, row_count=len(rows), batch_id=existing["batch_id"],
-            detail="同 sha256 文件已入库，未写入任何行",
+            detail=f"同 sha256 且同契约版本（{version}）的文件已入库，未写入任何行",
+            contract_version=version,
         )
         return {
             "status": "duplicate_file",
@@ -70,11 +76,12 @@ def import_batch(
             "existing_filename": existing["filename"],
             "existing_created_at": existing["created_at"],
             "attempt_id": attempt_id,
+            "contract_version": version,
             "rows_before": rows_before,
             "rows_after": rows_before,
             "written": 0,
             "duplicate_hint": (
-                "同一份文件（sha256 相同）已在库中。若确认要作为新批次重灌，"
+                f"同一份文件（sha256 相同、契约版本 {version} 相同）已在库中。若确认要作为新批次重灌，"
                 "勾选「force_new_batch」后重新提交；旧批次会保留并被标记 superseded。"
             ),
         }
@@ -86,8 +93,8 @@ def import_batch(
                   f"金额 {total_cents} 分 vs 分组和 {by_site_cents} 分；未写入。")
         store.record_attempt(conn, filename=filename, sha256=sha256, status="rolled_back",
                              encoding=encoding, error_count=1, row_count=len(rows),
-                             detail=detail)
-        return {"status": "rolled_back", "detail": detail,
+                             detail=detail, contract_version=version)
+        return {"status": "rolled_back", "detail": detail, "contract_version": version,
                 "rows_before": rows_before, "rows_after": rows_before, "written": 0}
 
     batch_id = batch_id or _new_batch_id(conn, sha256, forced=bool(existing))
@@ -96,18 +103,21 @@ def import_batch(
         conn.execute("BEGIN IMMEDIATE")
         conn.execute(
             "INSERT INTO batches(batch_id, filename, sha256, encoding, bom, row_count,"
-            " total_amount_cents, total_qty, forced, superseded_by, created_at, note)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            " total_amount_cents, total_qty, forced, superseded_by, created_at, note,"
+            " contract_version)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (batch_id, filename, sha256, encoding, 1 if bom else 0, len(rows),
-             total_cents, total_qty, 1 if existing else 0, None, store.now_iso(), note),
+             total_cents, total_qty, 1 if existing else 0, None, store.now_iso(), note,
+             version),
         )
         for row in rows:
             conn.execute(
                 "INSERT INTO fact_orders(batch_id, row_no, order_id, site, category,"
-                " order_date, amount_cents, qty, memo) VALUES(?,?,?,?,?,?,?,?,?)",
+                " order_date, amount_cents, amount_raw, qty, memo)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (batch_id, int(row["row_no"]), int(row["order_id"]), row["site"],
                  row["category"], row["order_date"], int(row["amount_cents"]),
-                 int(row["qty"]), row.get("memo") or None),
+                 row.get("amount_raw") or None, int(row["qty"]), row.get("memo") or None),
             )
             written += 1
             if fail_after is not None and written >= fail_after:
@@ -134,8 +144,9 @@ def import_batch(
         detail = f"事务回滚：{exc}；明细行数 {rows_before} → {rows_after}（应保持不变）。"
         store.record_attempt(conn, filename=filename, sha256=sha256, status="rolled_back",
                              encoding=encoding, error_count=1, row_count=len(rows),
-                             detail=detail)
+                             detail=detail, contract_version=version)
         return {"status": "rolled_back", "detail": detail, "batch_id": batch_id,
+                "contract_version": version,
                 "rows_before": rows_before, "rows_after": rows_after, "written": 0,
                 "error": str(exc)}
 
@@ -144,11 +155,13 @@ def import_batch(
         conn, filename=filename, sha256=sha256, status="committed", encoding=encoding,
         row_count=len(rows), batch_id=batch_id,
         detail=("force_new_batch 覆盖导入" if existing else "首次入库"),
+        contract_version=version,
     )
     return {
         "status": "committed",
         "batch_id": batch_id,
         "attempt_id": attempt_id,
+        "contract_version": version,
         "rows_before": rows_before,
         "rows_after": rows_after,
         "written": written,

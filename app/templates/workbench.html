@@ -31,6 +31,20 @@
         </div>
 
         <div class="field">
+          <label for="contract_version">契约版本（金额口径，每次导入都会记录在批次上）</label>
+          <select id="contract_version" name="contract_version">
+            {% for v in contract_versions %}
+            <option value="{{ v.version }}" {% if v.is_default %}selected{% endif %}>{{ v.version }} — {{ v.label }}</option>
+            {% endfor %}
+          </select>
+          <p class="small muted" style="margin:6px 0 0">
+            {% for v in contract_versions %}
+            <code>{{ v.version }}</code>：{{ v.amount_rule }}{% if not loop.last %}<br>{% endif %}
+            {% endfor %}
+          </p>
+        </div>
+
+        <div class="field">
           <label for="extra_policy">契约外列策略</label>
           <select id="extra_policy" name="extra_policy">
             {% for p in policies %}
@@ -141,7 +155,10 @@
       </div>
       <div class="panel-body tight">
         <p class="small muted" style="margin:0">
-          站点枚举：{{ sites | join(' / ') }}；品类枚举：{{ categories | join(' / ') }}。列顺序无关，表头会去首尾空白。
+          站点枚举：{{ sites | join(' / ') }}；品类枚举：{{ categories | join(' / ') }}。列顺序无关，表头会去首尾空白。<br>
+          上表为默认版 <code>{{ default_contract_version }}</code> 的列定义；两版仅 <code>amount</code> 口径不同：
+          {% for v in contract_versions %}<code>{{ v.version }}</code> {{ v.amount_rule }}{% if not loop.last %}；{% endif %}{% endfor %}。
+          金额入库统一换算成分（amount_cents），跨版本汇总可对账。
         </p>
       </div>
     </section>
@@ -157,7 +174,7 @@
           <tbody>
             <tr><td>必填为空</td><td>契约必填列读到空字符串</td><td><code>required</code></td><td class="small">回上游补全该字段；空字符串也视为缺失。</td></tr>
             <tr><td>长度上限</td><td>去首尾空白后字符数超上限</td><td><code>length</code></td><td class="small">截断或与上游确认口径。</td></tr>
-            <tr><td>类型 / 枚举</td><td>整数、金额、日期格式不符或枚举越界</td><td><code>int_type</code> <code>decimal_scale</code> <code>date_format</code> <code>enum</code></td><td class="small">金额不要带千分位/货币符号，日期统一 YYYY-MM-DD。</td></tr>
+            <tr><td>类型 / 枚举</td><td>整数、金额、日期格式不符或枚举越界</td><td><code>int_type</code> <code>decimal_scale</code> <code>cents_type</code> <code>date_format</code> <code>enum</code></td><td class="small">金额不要带千分位/货币符号；v2 版按分填整数，日期统一 YYYY-MM-DD。</td></tr>
             <tr><td>日期真实存在</td><td>格式对但日期不存在（如 2026-02-30）</td><td><code>date_invalid</code></td><td class="small">上游算错日期，业务确认后重导。</td></tr>
             <tr><td>主键严格递增</td><td>order_id 与上一可解析行相等 / 更小</td><td><code>duplicate</code> / <code>out_of_order</code></td><td class="small">去重或按主键升序重新导出。</td></tr>
             <tr><td>列数一致</td><td>本行列数 ≠ 表头列数</td><td><code>column_count</code></td><td class="small">检查是否漏逗号或字段内未转义逗号。</td></tr>

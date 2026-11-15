@@ -1,6 +1,6 @@
 {
-  "contract_version": "2026.11",
   "dataset": "daily_site_orders",
+  "default_version": "v1-yuan",
   "delimiter": ",",
   "encoding": [
     "utf-8-sig",
@@ -10,73 +10,154 @@
   "primary_key": "order_id",
   "primary_key_rule": "strictly_increasing",
   "extra_column_policy": "reject",
-  "columns": [
-    {
-      "name": "site",
-      "required": true,
-      "type": "enum",
-      "enum": [
-        "beijing",
-        "shanghai",
-        "guangzhou",
-        "shenzhen",
-        "chengdu",
-        "hangzhou"
-      ],
-      "max_length": 32,
-      "label": "站点"
+  "versions": {
+    "v1-yuan": {
+      "contract_version": "2026.11",
+      "label": "2026.11 版 · 金额按元",
+      "amount_unit": "yuan",
+      "columns": [
+        {
+          "name": "site",
+          "required": true,
+          "type": "enum",
+          "enum": [
+            "beijing",
+            "shanghai",
+            "guangzhou",
+            "shenzhen",
+            "chengdu",
+            "hangzhou"
+          ],
+          "max_length": 32,
+          "label": "站点"
+        },
+        {
+          "name": "category",
+          "required": true,
+          "type": "enum",
+          "enum": [
+            "electronics",
+            "grocery",
+            "apparel"
+          ],
+          "max_length": 32,
+          "label": "品类"
+        },
+        {
+          "name": "order_id",
+          "required": true,
+          "type": "int",
+          "max_length": 32,
+          "label": "订单号（主键，需严格递增）"
+        },
+        {
+          "name": "order_date",
+          "required": true,
+          "type": "date",
+          "max_length": 10,
+          "format": "YYYY-MM-DD",
+          "label": "下单日期"
+        },
+        {
+          "name": "amount",
+          "required": true,
+          "type": "decimal",
+          "max_length": 16,
+          "scale": 2,
+          "min": "0.01",
+          "label": "金额（元）"
+        },
+        {
+          "name": "qty",
+          "required": true,
+          "type": "int",
+          "max_length": 8,
+          "min": 1,
+          "max": 100000,
+          "label": "件数"
+        },
+        {
+          "name": "memo",
+          "required": false,
+          "type": "string",
+          "max_length": 60,
+          "label": "备注（可选）"
+        }
+      ]
     },
-    {
-      "name": "category",
-      "required": true,
-      "type": "enum",
-      "enum": [
-        "electronics",
-        "grocery",
-        "apparel"
-      ],
-      "max_length": 32,
-      "label": "品类"
-    },
-    {
-      "name": "order_id",
-      "required": true,
-      "type": "int",
-      "max_length": 32,
-      "label": "订单号（主键，需严格递增）"
-    },
-    {
-      "name": "order_date",
-      "required": true,
-      "type": "date",
-      "max_length": 10,
-      "format": "YYYY-MM-DD",
-      "label": "下单日期"
-    },
-    {
-      "name": "amount",
-      "required": true,
-      "type": "decimal",
-      "max_length": 16,
-      "scale": 2,
-      "min": "0.01",
-      "label": "金额"
-    },
-    {
-      "name": "qty",
-      "required": true,
-      "type": "int",
-      "max_length": 8,
-      "min": 1,
-      "max": 100000,
-      "label": "件数"
-    },
-    {
-      "name": "memo",
-      "required": false,
-      "type": "string",
-      "max_length": 60,
-      "label": "备注（可选）"
+    "v2-cents": {
+      "contract_version": "2026.12",
+      "label": "2026.12 版 · 金额按分",
+      "amount_unit": "cent",
+      "columns": [
+        {
+          "name": "site",
+          "required": true,
+          "type": "enum",
+          "enum": [
+            "beijing",
+            "shanghai",
+            "guangzhou",
+            "shenzhen",
+            "chengdu",
+            "hangzhou"
+          ],
+          "max_length": 32,
+          "label": "站点"
+        },
+        {
+          "name": "category",
+          "required": true,
+          "type": "enum",
+          "enum": [
+            "electronics",
+            "grocery",
+            "apparel"
+          ],
+          "max_length": 32,
+          "label": "品类"
+        },
+        {
+          "name": "order_id",
+          "required": true,
+          "type": "int",
+          "max_length": 32,
+          "label": "订单号（主键，需严格递增）"
+        },
+        {
+          "name": "order_date",
+          "required": true,
+          "type": "date",
+          "max_length": 10,
+          "format": "YYYY-MM-DD",
+          "label": "下单日期"
+        },
+        {
+          "name": "amount",
+          "required": true,
+          "type": "int",
+          "max_length": 12,
+          "min": 1,
+          "max": 9999999999,
+          "label": "金额（分）"
+        },
+        {
+          "name": "qty",
+          "required": true,
+          "type": "int",
+          "max_length": 8,
+          "min": 1,
+          "max": 100000,
+          "label": "件数"
+        },
+        {
+          "name": "memo",
+          "required": false,
+          "type": "string",
+          "max_length": 60,
+          "label": "备注（可选）"
+        }
+      ]
     }
-  ]
+  }
 }

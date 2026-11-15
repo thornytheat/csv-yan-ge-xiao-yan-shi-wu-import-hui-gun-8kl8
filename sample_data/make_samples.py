@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """生成 csvgate 演示样例（可重复执行，输出字节稳定）。
 
-- normal_500.csv : UTF-8 无 BOM，500 行，order_id 严格递增
+- normal_500.csv : UTF-8 无 BOM，500 行，order_id 严格递增（v1-yuan 元口径）
+- cents_240.csv  : UTF-8 无 BOM，240 行，amount 为整数分（v2-cents 分口径）
 - gbk_120.csv    : GB18030(GBK 超集) 编码，120 行，memo 列含中文备注
 - seed_20261107.csv : 历史周批次，60 行（启动时幂等 seed 用）
 - broken.csv     : 5 类错误各 1 条，其余行合法
-- contract.json  : 列契约
+- contract.json  : 两个契约版本的列契约
 
 CSV 一律 \n 换行、无引号包裹（字段不含逗号/引号），行号与文件行可直接对应。
 """
@@ -22,30 +23,51 @@ HEADER = ["site", "category", "order_id", "order_date", "amount", "qty"]
 SITES = ["beijing", "shanghai", "guangzhou", "shenzhen", "chengdu", "hangzhou"]
 CATEGORIES = ["electronics", "grocery", "apparel"]
 
+_SHARED_COLUMNS = [
+    {"name": "site", "required": True, "type": "enum", "enum": SITES, "max_length": 32,
+     "label": "站点"},
+    {"name": "category", "required": True, "type": "enum", "enum": CATEGORIES, "max_length": 32,
+     "label": "品类"},
+    {"name": "order_id", "required": True, "type": "int", "max_length": 32,
+     "label": "订单号（主键，需严格递增）"},
+    {"name": "order_date", "required": True, "type": "date", "max_length": 10,
+     "format": "YYYY-MM-DD", "label": "下单日期"},
+]
+_TAIL_COLUMNS = [
+    {"name": "qty", "required": True, "type": "int", "max_length": 8,
+     "min": 1, "max": 100000, "label": "件数"},
+    {"name": "memo", "required": False, "type": "string", "max_length": 60,
+     "label": "备注（可选）"},
+]
+
 CONTRACT = {
-    "contract_version": "2026.11",
     "dataset": "daily_site_orders",
+    "default_version": "v1-yuan",
     "delimiter": ",",
     "encoding": ["utf-8-sig", "utf-8", "gb18030"],
     "primary_key": "order_id",
     "primary_key_rule": "strictly_increasing",
     "extra_column_policy": "reject",
-    "columns": [
-        {"name": "site", "required": True, "type": "enum", "enum": SITES, "max_length": 32,
-         "label": "站点"},
-        {"name": "category", "required": True, "type": "enum", "enum": CATEGORIES, "max_length": 32,
-         "label": "品类"},
-        {"name": "order_id", "required": True, "type": "int", "max_length": 32,
-         "label": "订单号（主键，需严格递增）"},
-        {"name": "order_date", "required": True, "type": "date", "max_length": 10,
-         "format": "YYYY-MM-DD", "label": "下单日期"},
-        {"name": "amount", "required": True, "type": "decimal", "max_length": 16,
-         "scale": 2, "min": "0.01", "label": "金额"},
-        {"name": "qty", "required": True, "type": "int", "max_length": 8,
-         "min": 1, "max": 100000, "label": "件数"},
-        {"name": "memo", "required": False, "type": "string", "max_length": 60,
-         "label": "备注（可选）"},
-    ],
+    "versions": {
+        "v1-yuan": {
+            "contract_version": "2026.11",
+            "label": "2026.11 版 · 金额按元",
+            "amount_unit": "yuan",
+            "columns": _SHARED_COLUMNS + [
+                {"name": "amount", "required": True, "type": "decimal", "max_length": 16,
+                 "scale": 2, "min": "0.01", "label": "金额（元）"},
+            ] + _TAIL_COLUMNS,
+        },
+        "v2-cents": {
+            "contract_version": "2026.12",
+            "label": "2026.12 版 · 金额按分",
+            "amount_unit": "cent",
+            "columns": _SHARED_COLUMNS + [
+                {"name": "amount", "required": True, "type": "int", "max_length": 12,
+                 "min": 1, "max": 9999999999, "label": "金额（分）"},
+            ] + _TAIL_COLUMNS,
+        },
+    },
 }
 
 
@@ -54,11 +76,16 @@ def _amount(i: int) -> str:
     return f"{cents // 100}.{cents % 100:02d}"
 
 
+def _amount_cents(i: int) -> str:
+    return str(1200 + (i * 137) % 880000)
+
+
 def _qty(i: int) -> int:
     return 1 + (i * 17) % 9
 
 
-def rows(count: int, start_id: int, day0: date, days: int, memo: bool) -> list[list[str]]:
+def rows(count: int, start_id: int, day0: date, days: int, memo: bool,
+         cents: bool = False) -> list[list[str]]:
     rng = random.Random(20261114)
     out = []
     for i in range(count):
@@ -68,7 +95,7 @@ def rows(count: int, start_id: int, day0: date, days: int, memo: bool) -> list[l
             CATEGORIES[(i * 7) % len(CATEGORIES)],
             str(start_id + i),
             day.isoformat(),
-            _amount(i + rng.randint(0, 3) * 0),
+            _amount_cents(i + rng.randint(0, 3) * 0) if cents else _amount(i + rng.randint(0, 3) * 0),
             str(_qty(i)),
         ]
         if memo:
@@ -118,6 +145,8 @@ def broken_rows() -> list[list[str]]:
 def main() -> None:
     write_csv(HERE / "normal_500.csv", HEADER,
               rows(500, 100001, date(2026, 11, 1), 13, memo=False), "utf-8")
+    write_csv(HERE / "cents_240.csv", HEADER,
+              rows(240, 300001, date(2026, 11, 3), 11, memo=False, cents=True), "utf-8")
     write_csv(HERE / "gbk_120.csv", HEADER + ["memo"],
               rows(120, 200001, date(2026, 11, 2), 12, memo=True), "gb18030")
     write_csv(HERE / "seed_20261107.csv", HEADER,

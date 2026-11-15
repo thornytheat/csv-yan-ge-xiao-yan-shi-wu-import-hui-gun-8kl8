@@ -16,14 +16,16 @@ SEED_BATCH_ID = "B-20261107-001"
 SEED_FILENAME = "seed_20261107.csv"
 
 SAMPLE_FILES = [
-    {"name": "normal_500.csv", "title": "正常 500 行（UTF-8）",
-     "desc": "主键严格递增、6 个站点，应整体入库成功"},
+    {"name": "normal_500.csv", "title": "正常 500 行（UTF-8 · 元）",
+     "desc": "主键严格递增、6 个站点，v1-yuan 元口径，应整体入库成功"},
+    {"name": "cents_240.csv", "title": "新口径 240 行（UTF-8 · 分）",
+     "desc": "amount 为整数分，需选 v2-cents 契约版本导入，验证分口径校验"},
     {"name": "gbk_120.csv", "title": "GBK 120 行",
      "desc": "GB18030 编码 + 中文备注列，验证编码探测与解码"},
     {"name": "broken.csv", "title": "5 类错误样例",
      "desc": "重复主键/倒序/非法日期/超长/枚举越界各 1 条，应整体回滚"},
     {"name": "contract.json", "title": "列契约 contract.json",
-     "desc": "列定义、类型、枚举与主键规则"},
+     "desc": "两个契约版本的列定义、金额口径、类型、枚举与主键规则"},
 ]
 
 EXTRA_POLICIES = [

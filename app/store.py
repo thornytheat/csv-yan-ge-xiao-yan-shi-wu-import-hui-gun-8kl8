@@ -1,11 +1,16 @@
 """SQLite 访问（薄封装，无 ORM）。
 
 表：
-- meta(key,value)                  seed 版本
-- batches(...)                     已入库批次，sha256 用于重复文件判定
-- fact_orders(...)                 明细事实，仅 committed 批次写入
+- meta(key,value)                  seed 版本 / 契约迁移标记（contract_migration）
+- batches(...)                     已入库批次，(sha256, contract_version) 用于重复文件判定
+- fact_orders(...)                 明细事实，仅 committed 批次写入；amount_cents 为
+                                   跨版本统一口径（分），amount_raw 保留原始字符串
 - batch_aggregates(...)            按 site 聚合快照
 - import_attempts(...)             每次上传的结论（含回滚记录）/review 用
+
+契约版本：batches.contract_version / import_attempts.contract_version 记录每次
+导入使用的契约版本（v1-yuan 按元 / v2-cents 按分）。老库升级时列以可空形式补上，
+历史行保持 NULL，由 app/migrate.py 在一个事务里盖章、重算并一次性切换。
 """
 from __future__ import annotations
 
@@ -33,6 +38,7 @@ CREATE TABLE IF NOT EXISTS batches (
   total_qty INTEGER NOT NULL,
   forced INTEGER NOT NULL DEFAULT 0,
   superseded_by TEXT,
+  contract_version TEXT,
   created_at TEXT NOT NULL,
   note TEXT
 );
@@ -47,6 +53,7 @@ CREATE TABLE IF NOT EXISTS fact_orders (
   category TEXT NOT NULL,
   order_date TEXT NOT NULL,
   amount_cents INTEGER NOT NULL,
+  amount_raw TEXT,
   qty INTEGER NOT NULL,
   memo TEXT
 );
@@ -70,6 +77,7 @@ CREATE TABLE IF NOT EXISTS import_attempts (
   error_count INTEGER NOT NULL DEFAULT 0,
   row_count INTEGER NOT NULL DEFAULT 0,
   batch_id TEXT,
+  contract_version TEXT,
   detail TEXT,
   errors_json TEXT,
   created_at TEXT NOT NULL
@@ -78,6 +86,13 @@ CREATE TABLE IF NOT EXISTS import_attempts (
 
 # 允许的上传策略（避免路由随意传值）
 STATUSES = ("committed", "duplicate_file", "rejected", "encoding_failed", "rolled_back")
+
+# 老库补列：(表, 列, 列定义)。列一律可空，历史行保持 NULL，等契约迁移统一盖章。
+_LEGACY_COLUMNS = (
+    ("batches", "contract_version", "TEXT"),
+    ("fact_orders", "amount_raw", "TEXT"),
+    ("import_attempts", "contract_version", "TEXT"),
+)
 
 
 def now_iso() -> str:
@@ -96,6 +111,18 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
 
 def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    ensure_columns(conn)
+
+
+def ensure_columns(conn: sqlite3.Connection) -> None:
+    """老库补列（幂等）：已存在的列跳过，缺失的以可空列补上。
+
+    只加列、不动数据；历史行的盖章与重算由 app/migrate.py 单事务完成。
+    """
+    for table, column, ddl in _LEGACY_COLUMNS:
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
 
 def get_meta(conn: sqlite3.Connection, key: str) -> str | None:
@@ -115,7 +142,16 @@ def count_rows(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) AS c FROM fact_orders").fetchone()["c"]
 
 
-def find_batch_by_sha(conn: sqlite3.Connection, sha256: str) -> sqlite3.Row | None:
+def find_batch_by_sha(conn: sqlite3.Connection, sha256: str,
+                      contract_version: str | None = None) -> sqlite3.Row | None:
+    """重复文件判定：契约版本给定时按 (sha256, 版本) 匹配——同一份字节按不同
+    口径解释是不同的导入，不算重复；不给版本则退化为仅按 sha256（复核页用）。"""
+    if contract_version is not None:
+        return conn.execute(
+            "SELECT * FROM batches WHERE sha256 = ? AND contract_version = ?"
+            " ORDER BY created_at ASC LIMIT 1",
+            (sha256, contract_version),
+        ).fetchone()
     return conn.execute(
         "SELECT * FROM batches WHERE sha256 = ? ORDER BY created_at ASC LIMIT 1", (sha256,)
     ).fetchone()
@@ -137,6 +173,7 @@ def list_batches(conn: sqlite3.Connection, limit: int = 30) -> list[dict]:
             "total_qty": r["total_qty"],
             "forced": bool(r["forced"]),
             "superseded_by": r["superseded_by"],
+            "contract_version": r["contract_version"],
             "created_at": r["created_at"],
         }
         for r in rows
@@ -162,8 +199,8 @@ def get_batch(conn: sqlite3.Connection, batch_id: str) -> dict | None:
     ]
     sample = [
         dict(r) for r in conn.execute(
-            "SELECT row_no, order_id, site, category, order_date, amount_cents, qty, memo "
-            "FROM fact_orders WHERE batch_id = ? ORDER BY row_no LIMIT 20",
+            "SELECT row_no, order_id, site, category, order_date, amount_cents, amount_raw,"
+            " qty, memo FROM fact_orders WHERE batch_id = ? ORDER BY row_no LIMIT 20",
             (batch_id,),
         ).fetchall()
     ]
@@ -181,6 +218,7 @@ def get_batch(conn: sqlite3.Connection, batch_id: str) -> dict | None:
         "total_qty": row["total_qty"],
         "forced": bool(row["forced"]),
         "superseded_by": row["superseded_by"],
+        "contract_version": row["contract_version"],
         "created_at": row["created_at"],
         "note": row["note"],
         "aggregates": agg,
@@ -212,14 +250,15 @@ def get_attempt(conn: sqlite3.Connection, attempt_id: int) -> dict | None:
 def record_attempt(conn: sqlite3.Connection, *, filename: str, sha256: str, status: str,
                    encoding: str = "", error_count: int = 0, row_count: int = 0,
                    batch_id: str | None = None, detail: str = "",
-                   errors: list[dict] | None = None) -> int:
+                   errors: list[dict] | None = None,
+                   contract_version: str | None = None) -> int:
     payload = json.dumps(errors[:200] if errors else [], ensure_ascii=False)
     cur = conn.execute(
         "INSERT INTO import_attempts(filename, sha256, encoding, status, error_count,"
-        " row_count, batch_id, detail, errors_json, created_at)"
-        " VALUES(?,?,?,?,?,?,?,?,?,?)",
-        (filename, sha256, encoding, status, error_count, row_count, batch_id, detail,
-         payload, now_iso()),
+        " row_count, batch_id, contract_version, detail, errors_json, created_at)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (filename, sha256, encoding, status, error_count, row_count, batch_id,
+         contract_version, detail, payload, now_iso()),
     )
     return int(cur.lastrowid or 0)
 
